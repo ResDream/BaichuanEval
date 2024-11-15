@@ -1,13 +1,16 @@
 import argparse
 import torch
 import numpy as np
+import json
+import os
+from datetime import datetime
+from pathlib import Path
 from categories import subcategories, categories
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 
+# 常量定义保持不变
 choices = ["A", "B", "C", "D"]
-
-# Define available subjects
 SUBJECTS = [
     'abstract_algebra', 'anatomy', 'astronomy', 'business_ethics', 'clinical_knowledge',
     'college_biology', 'college_chemistry', 'college_computer_science', 'college_mathematics',
@@ -29,14 +32,11 @@ SUBJECTS = [
 
 def format_subject(subject):
     l = subject.split("_")
-    s = ""
-    for entry in l:
-        s += " " + entry
-    return s
+    return " ".join(l)
 
 
 def format_example(example, include_answer=True):
-    """Format a single example from the dataset"""
+    """格式化单个示例"""
     prompt = example['question']
     for j, choice in enumerate(choices):
         prompt += f"\n{choice}. {example[f'choices'][j]}"
@@ -47,7 +47,7 @@ def format_example(example, include_answer=True):
 
 
 def gen_prompt(train_examples, subject, k=-1):
-    """Generate prompt from training examples"""
+    """生成提示文本"""
     prompt = "The following are multiple choice questions (with answers) about {}.\n\n".format(
         format_subject(subject)
     )
@@ -62,15 +62,14 @@ def gen_prompt(train_examples, subject, k=-1):
 def eval(args, subject, model, tokenizer, dev_examples, test_examples):
     cors = []
     all_probs = []
+    predictions = []  # 存储详细预测结果
 
-    # 添加选项到数字的映射
     letter_to_number = {'A': 0, 'B': 1, 'C': 2, 'D': 3}
     number_to_letter = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
 
-    print(f"\n{'=' * 20} Evaluating {subject} {'=' * 20}")
+    print(f"\n{'=' * 20} 正在评估 {subject} {'=' * 20}")
 
     for i, example in enumerate(test_examples):
-        # get prompt and make sure it fits
         k = args.ntrain
         prompt_end = format_example(example, include_answer=False)
         train_prompt = gen_prompt(dev_examples, subject, k)
@@ -78,7 +77,6 @@ def eval(args, subject, model, tokenizer, dev_examples, test_examples):
 
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-        # 确保不超过模型最大长度
         if inputs.input_ids.shape[-1] > model.config.max_position_embeddings:
             while inputs.input_ids.shape[-1] > model.config.max_position_embeddings:
                 k -= 1
@@ -86,51 +84,76 @@ def eval(args, subject, model, tokenizer, dev_examples, test_examples):
                 prompt = train_prompt + prompt_end
                 inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-        # 生成回答
         outputs = model(**inputs)
-        logits = outputs.logits[0, -1]  # 取最后一个token的logits
+        logits = outputs.logits[0, -1]
 
-        # 获取各个选项的概率
         choice_probs = []
         for choice in choices:
-            choice_id = tokenizer.encode(" " + choice, add_special_tokens=False)[0]  # 添加空格避免subword问题
+            choice_id = tokenizer.encode(" " + choice, add_special_tokens=False)[0]
             choice_probs.append(logits[choice_id].item())
 
         probs = torch.nn.functional.softmax(torch.tensor(choice_probs), dim=0).numpy()
         pred_letter = choices[np.argmax(choice_probs)]
         pred_number = letter_to_number[pred_letter]
 
-        label = int(example['answer'])  # 确保标准答案是数字
+        label = int(example['answer'])
         label_letter = number_to_letter[label]
         cor = pred_number == label
+
         cors.append(cor)
         all_probs.append(probs)
 
-        # Print detailed results for this example
-        # print(f"\nQuestion {i + 1}:")
-        # print(f"Problem: {example['question']}")
-        # print("Options:")
-        # for j, choice in enumerate(choices):
-            # print(f"{choice}. {example['choices'][j]} (Probability: {probs[j]:.3f})")
-        # print(f"Model prediction: {pred_letter} ({pred_number})")
-        # print(f"Correct answer: {label_letter} ({label})")
-        # print(f"Correct: {'✓' if cor else '✗'}")
-        # print("-" * 50)
+        # 存储详细预测结果
+        predictions.append({
+            'question': example['question'],
+            'choices': example['choices'],
+            'prediction': pred_letter,
+            'correct_answer': label_letter,
+            'probabilities': probs.tolist(),
+            'correct': cor
+        })
 
     acc = np.mean(cors)
-    cors = np.array(cors)
-    all_probs = np.array(all_probs)
-
-    print(f"\nSubject: {subject}")
-    print(f"Average accuracy: {acc:.3f}")
-    print(f"Total examples: {len(test_examples)}")
-    print(f"Correct predictions: {sum(cors)}")
+    print(f"\n科目: {subject}")
+    print(f"平均准确率: {acc:.3f}")
+    print(f"总样本数: {len(test_examples)}")
+    print(f"正确预测数: {sum(cors)}")
     print("=" * 50)
 
-    return cors, acc, all_probs
+    return {
+        'accuracy': acc,
+        'total_examples': len(test_examples),
+        'correct_count': sum(cors),
+        'detailed_predictions': predictions,
+        'raw_cors': cors,
+        'probabilities': [p.tolist() for p in all_probs]
+    }
+
+
+def save_results(args, results_data, timestamp):
+    """保存评估结果到JSON文件"""
+    try:
+        # 创建保存目录
+        save_dir = Path(args.save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # 创建包含模型名称和时间戳的文件名
+        model_name = args.model.split('/')[-1]
+        filename = f"mmlu_results_{model_name}_{timestamp}.json"
+        save_path = save_dir / filename
+
+        with open(save_path, 'w', encoding='utf-8') as f:
+            json.dump(results_data, f, indent=2, ensure_ascii=False)
+        print(f"\n结果已保存至: {save_path}")
+
+    except Exception as e:
+        print(f"\n保存结果时出错: {str(e)}")
+
 
 def main(args):
-    # Load model and tokenizer
+    # 记录开始时间和时间戳
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         torch_dtype=torch.float16,
@@ -141,28 +164,40 @@ def main(args):
         args.model,
         trust_remote_code=True,
     )
-
     model.eval()
 
-    # Initialize result storage
-    all_cors = []
-    subcat_cors = {
-        subcat: [] for subcat_lists in subcategories.values() for subcat in subcat_lists
+    # 初始化结果存储
+    results_data = {
+        "metadata": {
+            "model": args.model,
+            "num_train_examples": args.ntrain,
+            "timestamp": timestamp,
+        },
+        "overall_results": {
+            "total_correct": 0,
+            "total_questions": 0,
+            "overall_accuracy": 0
+        },
+        "subject_results": {},
+        "subcategory_results": {
+            subcat: {"correct": 0, "total": 0, "accuracy": 0}
+            for subcat_lists in subcategories.values()
+            for subcat in subcat_lists
+        },
+        "category_results": {
+            cat: {"correct": 0, "total": 0, "accuracy": 0}
+            for cat in categories
+        }
     }
-    cat_cors = {cat: [] for cat in categories}
 
-    # Evaluate each subject
-    overall_correct = 0
-    overall_total = 0
-
+    # 评估每个科目
     for subject in SUBJECTS:
         try:
             dataset = load_dataset("cais/mmlu", subject)
 
-            # Convert datasets to lists
             dev_examples = list(dataset['dev'])
             if args.ntrain > len(dev_examples):
-                print(f"Warning: requested {args.ntrain} examples but only {len(dev_examples)} available for {subject}")
+                print(f"警告: 要求{args.ntrain}个示例，但{subject}只有{len(dev_examples)}个可用")
                 dev_examples = dev_examples[:len(dev_examples)]
             else:
                 dev_examples = dev_examples[:args.ntrain]
@@ -170,46 +205,69 @@ def main(args):
             test_examples = list(dataset['test'])
 
             if not dev_examples or not test_examples:
-                print(f"Skipping {subject} - no examples found")
+                print(f"跳过{subject} - 未找到示例")
                 continue
 
-            cors, acc, probs = eval(args, subject, model, tokenizer, dev_examples, test_examples)
+            # 获取该科目的评估结果
+            subject_results = eval(args, subject, model, tokenizer, dev_examples, test_examples)
+            results_data["subject_results"][subject] = subject_results
 
-            # Update overall statistics
-            overall_correct += sum(cors)
-            overall_total += len(cors)
+            # 更新总体统计
+            results_data["overall_results"]["total_correct"] += subject_results["correct_count"]
+            results_data["overall_results"]["total_questions"] += subject_results["total_examples"]
 
-            # Store results
+            # 更新子类别和类别统计
             if subject in subcategories:
                 subcats = subcategories[subject]
                 for subcat in subcats:
-                    subcat_cors[subcat].append(cors)
+                    results_data["subcategory_results"][subcat]["correct"] += subject_results["correct_count"]
+                    results_data["subcategory_results"][subcat]["total"] += subject_results["total_examples"]
+
                     for key in categories.keys():
                         if subcat in categories[key]:
-                            cat_cors[key].append(cors)
-            all_cors.append(cors)
+                            results_data["category_results"][key]["correct"] += subject_results["correct_count"]
+                            results_data["category_results"][key]["total"] += subject_results["total_examples"]
 
         except Exception as e:
-            print(f"Error processing subject {subject}: {str(e)}")
+            print(f"处理科目 {subject} 时出错: {str(e)}")
             continue
 
-    # Print final summary results
-    print("\n" + "=" * 20 + " Final Results " + "=" * 20)
-    print(f"Overall Accuracy: {overall_correct / overall_total:.3f}")
-    print(f"Total Correct: {overall_correct}")
-    print(f"Total Questions: {overall_total}")
+    # 计算最终准确率
+    total_correct = results_data["overall_results"]["total_correct"]
+    total_questions = results_data["overall_results"]["total_questions"]
+    results_data["overall_results"]["overall_accuracy"] = total_correct / total_questions if total_questions > 0 else 0
 
-    print("\nResults by subcategory:")
-    for subcat in subcat_cors:
-        if subcat_cors[subcat]:
-            subcat_acc = np.mean(np.concatenate(subcat_cors[subcat]))
-            print(f"{subcat}: {subcat_acc:.3f}")
+    # 计算子类别和类别准确率
+    for subcat in results_data["subcategory_results"]:
+        total = results_data["subcategory_results"][subcat]["total"]
+        if total > 0:
+            results_data["subcategory_results"][subcat]["accuracy"] = \
+                results_data["subcategory_results"][subcat]["correct"] / total
 
-    print("\nResults by category:")
-    for cat in cat_cors:
-        if cat_cors[cat]:
-            cat_acc = np.mean(np.concatenate(cat_cors[cat]))
-            print(f"{cat}: {cat_acc:.3f}")
+    for cat in results_data["category_results"]:
+        total = results_data["category_results"][cat]["total"]
+        if total > 0:
+            results_data["category_results"][cat]["accuracy"] = \
+                results_data["category_results"][cat]["correct"] / total
+
+    # 打印最终结果
+    print("\n" + "=" * 20 + " 最终结果 " + "=" * 20)
+    print(f"总体准确率: {results_data['overall_results']['overall_accuracy']:.3f}")
+    print(f"总正确数: {total_correct}")
+    print(f"总题目数: {total_questions}")
+
+    print("\n子类别结果:")
+    for subcat, results in results_data["subcategory_results"].items():
+        if results["total"] > 0:
+            print(f"{subcat}: {results['accuracy']:.3f}")
+
+    print("\n类别结果:")
+    for cat, results in results_data["category_results"].items():
+        if results["total"] > 0:
+            print(f"{cat}: {results['accuracy']:.3f}")
+
+    # 保存结果
+    save_results(args, results_data, timestamp)
 
 
 if __name__ == "__main__":
@@ -224,3 +282,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(args)
+
