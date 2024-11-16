@@ -54,9 +54,12 @@ def load_model_and_tokenizer(checkpoint_path):
     try:
         model = AutoModelForCausalLM.from_pretrained(
             checkpoint_path,
-            device_map="auto",
+            torch_dtype=torch.float16,
+            device_map="cuda:0",
             trust_remote_code=True
         ).eval()
+        # Move model to GPU
+        model.to("cuda:0")
     except Exception as e:
         raise RuntimeError(f"Failed to load model: {str(e)}")
 
@@ -66,7 +69,7 @@ def load_model_and_tokenizer(checkpoint_path):
 def generate_sample(model, tokenizer, input_txt):
     input_ids = tokenizer.encode(input_txt)
     raw_text_len = len(input_ids)
-    context_enc = torch.tensor([input_ids]).to(model.device)
+    context_enc = torch.tensor([input_ids]).to("cuda")  # Move input to GPU
     # print(f"Input text: {input_txt}\n")
 
     try:
@@ -175,6 +178,7 @@ if __name__ == "__main__":
             context = doc_to_text(doc, fewshot_prompt)
             completion = generate_sample(model, tokenizer, context)
             answer = doc["answer"]
+            print(answer)
             acc = is_correct(completion, answer)
             doc["completion"] = completion
             doc["acc"] = acc
