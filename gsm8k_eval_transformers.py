@@ -133,6 +133,13 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Create results directory if it doesn't exist
+    if not os.path.exists("results"):
+        os.makedirs("results")
+
+    # Update output file path to include results directory
+    args.sample_output_file = os.path.join("results", args.sample_output_file)
+
     # Load and verify prompt file
     try:
         fewshot_prompt = check_prompt_file(args.prompt_file)
