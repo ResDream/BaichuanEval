@@ -1,3 +1,5 @@
+import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 import argparse
 import torch
 import numpy as np
@@ -8,6 +10,9 @@ from pathlib import Path
 from categories import subcategories, categories
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
+
+
+
 
 # 常量定义保持不变
 choices = ["A", "B", "C", "D"]
