@@ -1,10 +1,11 @@
+import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 import re
 import torch
 import argparse
 import jsonlines
 import numpy as np
 import datasets
-import os
 from datasets import load_from_disk, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
