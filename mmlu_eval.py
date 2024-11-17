@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from categories import subcategories, categories
-from mindnlp.transformers import AutoModelForCausalLM, AutoTokenizer
+from mindnlp.transformers import AutoModelForCausalLM, AutoTokenizer,BaiChuanForCausalLM
 from datasets import load_dataset
 
 
@@ -62,7 +62,7 @@ def gen_prompt(train_examples, subject, k=-1):
     return prompt
 
 
-@mindspore.jit
+# @mindspore.jit
 def eval(args, subject, model, tokenizer, dev_examples, test_examples):
     cors = []
     all_probs = []
@@ -79,14 +79,14 @@ def eval(args, subject, model, tokenizer, dev_examples, test_examples):
         train_prompt = gen_prompt(dev_examples, subject, k)
         prompt = train_prompt + prompt_end
 
-        inputs = tokenizer(prompt, return_tensors="ms").to(model.device)
+        inputs = tokenizer(prompt, return_tensors="ms")
 
         if inputs.input_ids.shape[-1] > model.config.max_position_embeddings:
             while inputs.input_ids.shape[-1] > model.config.max_position_embeddings:
                 k -= 1
                 train_prompt = gen_prompt(dev_examples, subject, k)
                 prompt = train_prompt + prompt_end
-                inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+                inputs = tokenizer(prompt, return_tensors="ms")
 
         outputs = model(**inputs)
         logits = outputs.logits[0, -1]
@@ -158,17 +158,18 @@ def main(args):
     # 记录开始时间和时间戳
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    model = AutoModelForCausalLM.from_pretrained(
+    model = BaiChuanForCausalLM.from_pretrained(
         args.model,
-        torch_dtype=mindspore.float16,
+        ms_dtype=mindspore.float16,
         trust_remote_code=True,
-        device_map="cuda:0"
+        mirror="huggingface",
+        size="7b"
     )
     tokenizer = AutoTokenizer.from_pretrained(
         args.model,
         trust_remote_code=True,
+        mirror="huggingface"
     )
-    model.eval()
 
     # 初始化结果存储
     results_data = {
@@ -196,45 +197,45 @@ def main(args):
 
     # 评估每个科目
     for subject in SUBJECTS:
-        try:
-            dataset = load_dataset("cais/mmlu", subject)
+        # try:
+        dataset = load_dataset("cais/mmlu", subject)
 
-            dev_examples = list(dataset['dev'])
-            if args.ntrain > len(dev_examples):
-                print(f"警告: 要求{args.ntrain}个示例，但{subject}只有{len(dev_examples)}个可用")
-                dev_examples = dev_examples[:len(dev_examples)]
-            else:
-                dev_examples = dev_examples[:args.ntrain]
+        dev_examples = list(dataset['dev'])
+        if args.ntrain > len(dev_examples):
+            print(f"警告: 要求{args.ntrain}个示例，但{subject}只有{len(dev_examples)}个可用")
+            dev_examples = dev_examples[:len(dev_examples)]
+        else:
+            dev_examples = dev_examples[:args.ntrain]
 
-            test_examples = list(dataset['test'])
+        test_examples = list(dataset['test'])
 
-            if not dev_examples or not test_examples:
-                print(f"跳过{subject} - 未找到示例")
-                continue
-
-            # 获取该科目的评估结果
-            subject_results = eval(args, subject, model, tokenizer, dev_examples, test_examples)
-            results_data["subject_results"][subject] = subject_results
-
-            # 更新总体统计
-            results_data["overall_results"]["total_correct"] += subject_results["correct_count"]
-            results_data["overall_results"]["total_questions"] += subject_results["total_examples"]
-
-            # 更新子类别和类别统计
-            if subject in subcategories:
-                subcats = subcategories[subject]
-                for subcat in subcats:
-                    results_data["subcategory_results"][subcat]["correct"] += subject_results["correct_count"]
-                    results_data["subcategory_results"][subcat]["total"] += subject_results["total_examples"]
-
-                    for key in categories.keys():
-                        if subcat in categories[key]:
-                            results_data["category_results"][key]["correct"] += subject_results["correct_count"]
-                            results_data["category_results"][key]["total"] += subject_results["total_examples"]
-
-        except Exception as e:
-            print(f"处理科目 {subject} 时出错: {str(e)}")
+        if not dev_examples or not test_examples:
+            print(f"跳过{subject} - 未找到示例")
             continue
+
+        # 获取该科目的评估结果
+        subject_results = eval(args, subject, model, tokenizer, dev_examples, test_examples)
+        results_data["subject_results"][subject] = subject_results
+
+        # 更新总体统计
+        results_data["overall_results"]["total_correct"] += subject_results["correct_count"]
+        results_data["overall_results"]["total_questions"] += subject_results["total_examples"]
+
+        # 更新子类别和类别统计
+        if subject in subcategories:
+            subcats = subcategories[subject]
+            for subcat in subcats:
+                results_data["subcategory_results"][subcat]["correct"] += subject_results["correct_count"]
+                results_data["subcategory_results"][subcat]["total"] += subject_results["total_examples"]
+
+                for key in categories.keys():
+                    if subcat in categories[key]:
+                        results_data["category_results"][key]["correct"] += subject_results["correct_count"]
+                        results_data["category_results"][key]["total"] += subject_results["total_examples"]
+
+        # except Exception as e:
+        #     print(f"处理科目 {subject} 时出错: {str(e)}")
+        #     continue
 
     # 计算最终准确率
     total_correct = results_data["overall_results"]["total_correct"]
